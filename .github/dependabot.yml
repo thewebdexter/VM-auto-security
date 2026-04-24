@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # Always keep GitHub Actions up to date
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
