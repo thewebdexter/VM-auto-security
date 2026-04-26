@@ -3,3 +3,6 @@ AI_LOG.md
 semgrep-findings.json
 node_modules/
 dist/
+AI_MAP.md
+AI_LOG.md
+semgrep-findings.json
