@@ -15,6 +15,8 @@ diff --git a/AI_MAP.md b/AI_MAP.md
 +- `AI_MAP.md`: Architectural context map.
 
 Unified diffs must include @@ hunk headers and line-prefixed changes (+/-); metadata headers alone are insufficient to apply modifications.
+Always include @@ hunk headers and +/- line prefixes in unified diffs to ensure they are structurally valid and applicable by patch tools.
+Enforce lexicographical sorting and line uniqueness in ignore files to prevent redundant entries and maintain configuration integrity.
 .
 ├── AI_LOG.md
 ├── AI_MAP.md
