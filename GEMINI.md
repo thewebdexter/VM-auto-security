@@ -23,6 +23,7 @@ Enforce lexicographical sorting and line uniqueness in ignore files to prevent r
 ├── GEMINI.md
 ├── LICENSE
 ├── README.md
+├── cleanup.sh
 ├── configs
 │   ├── 20auto-upgrades
 │   ├── 50unattended-upgrades
@@ -33,4 +34,4 @@ Enforce lexicographical sorting and line uniqueness in ignore files to prevent r
 └── scripts
     └── wp-auto-update.sh.tpl
 
-3 directories, 12 files
+3 directories, 13 files
