@@ -69,4 +69,36 @@ Invoke-ScriptAnalyzer -Path . -Recurse -Severity Warning,Error -Settings PSScrip
 .\Install.ps1 -DryRun
 .\Harden.ps1 -DryRun
 .\Declutter.ps1
+.\Harden.ps1 -Json -NonInteractive   # machine-readable, no prompts
 ```
+
+## v2.0.0 deltas
+
+- **Enterprise contract**: every script takes `-Json` (single-line JSON on
+  stdout via `Complete-Twdx`), `-NonInteractive`, `-DryRun`. Exit codes
+  `0` ok / `2` usage / `3` preflight / `4` partial. `$script:Steps` list +
+  `Add-Step name status [detail]`.
+- **`Install.ps1`**: "Windows Update automation" is now a *real* daily
+  `TWDxOSOptimisation-WindowsUpdate` scheduled task (PSWindowsUpdate
+  `Get-WindowsUpdate -Install`, or an AU registry-policy fallback). Firewall
+  baseline has a **lockout guard**: it reads `Get-NetTCPConnection` for an
+  established RDP/WinRM/SSH session and adds an inbound allow rule for that
+  port *before* setting `-DefaultInboundAction Block`.
+- **`Harden.ps1`**: same firewall guard + `-AllowInboundLockout` override;
+  new sections — telemetry (`AllowTelemetry` + disable `DiagTrack`), LLMNR
+  (`EnableMulticast=0`) + NetBIOS-over-TCP/IP (`NetbiosOptions=2` per
+  interface), SMBv1 removal, Defender (`Set-MpPreference`; Tamper Protection
+  reported only), SmartScreen, AutoRun/AutoPlay. `sshd_config` edits are now
+  inserted **before the first `Match` block**. Helper `Write-RegistryValue`
+  (named `Write-*`, not `Set-*`, to satisfy
+  `PSUseShouldProcessForStateChangingFunctions`).
+- **`Declutter.ps1`**: `Windows.old` removal via a **self-seeded `cleanmgr`
+  profile** (`StateFlags4242`) + `DISM /StartComponentCleanup` — no manual
+  `/sageset` needed. Cleans every user profile's `%LocalAppData%\Temp`, not
+  just the caller's. `-Json`.
+- **`Uninstall.ps1`**: `-NonInteractive` / `-Purge` / `-Json`; removes both
+  scheduled tasks and all `TWDxOSOptimisation-*` firewall rules.
+- **PSSA gotchas**: script `param()` vars referenced *only* inside a
+  `function` trip `PSReviewUnusedParameter` — reference them once in the main
+  body. State-changing verbs (`Set/New/Remove/Stop/...`) on custom functions
+  trip `PSUseShouldProcessForStateChangingFunctions`.

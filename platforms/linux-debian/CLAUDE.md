@@ -24,15 +24,39 @@ platforms/linux-debian/
 ├── harden.sh                   # Standalone OS hardening (SSH/sysctl/UFW)
 ├── declutter.sh                # apt/dpkg-based cleanup & audit script
 ├── configs/                    # Files fetched + checksum-verified by install.sh
-│   ├── 50unattended-upgrades
+│   ├── 50unattended-upgrades   # v2: security pocket only; Automatic-Reboot "false"
 │   ├── 20auto-upgrades
-│   ├── needrestart.conf
-│   ├── auto-reboot.service
+│   ├── needrestart.conf        # v2: $nrconf{restart} = 'l' (list-only)
+│   ├── auto-reboot.service     # v2: shutdown -r +5 + wall message
 │   ├── auto-reboot.timer.tpl
-│   └── fail2ban-jail.local
+│   ├── fail2ban-jail.local     # v2: ignoreip = loopback only
+│   └── journald-twdxos.conf    # v2 NEW: persistent storage + size/retention caps
+├── keys/
+│   ├── twdxos-release.pub      # minisign pubkey (PLACEHOLDER until maintainer signs)
+│   └── README.md
 └── modules/
-    └── wp-auto-update.sh.tpl   # Optional WP-CLI auto-update module (not the centerpiece)
+    └── wp-auto-update.sh.tpl   # Optional WP-CLI module — installed ONLY when WP_PATH is set
 ```
+
+## Enterprise scaffolding (v2.0.0 — every .sh in this folder)
+
+`install.sh` / `harden.sh` / `uninstall.sh` / `declutter.sh` all carry an
+inlined block (not a sourced lib — `install.sh` is still `curl | bash`-safe):
+
+| Concern | How |
+|---|---|
+| Flags | `--json` `--offline` `--non-interactive` `--require-signatures` `--strict` `--assume-yes` `--ref <r>` (+ env equivalents `JSON_OUTPUT` `OFFLINE` `NON_INTERACTIVE` `REQUIRE_SIGNATURES` `ASSUME_YES` `TWDX_REF`) |
+| Exit codes | `EX_OK=0` `EX_USAGE=2` `EX_PREFLIGHT=3` `EX_PARTIAL=4` `EX_INTEGRITY=5` |
+| JSON | `mark_step name ok\|failed\|skipped\|dry-run [detail]` → `emit_json` on exit via the single `_on_exit` EXIT trap. Human logs routed to stderr by `_out` when `--json`. |
+| Offline | `fetch_verified` reads `$BUNDLE_DIR/<path>` instead of curl; needs the platform folder present. |
+| Signatures | `fetch_verified` runs `minisign -V` against `keys/twdxos-release.pub` when it's real + `minisign` is on PATH; mandatory under `--require-signatures` (else SHA256-only with a warn). |
+| Feature toggles | `ENABLE_UNATTENDED_UPGRADES` `ENABLE_FAIL2BAN` `ENABLE_NEEDRESTART` `ENABLE_AUTO_REBOOT` `ENABLE_TIMESYNC` `ENABLE_JOURNALD_TUNING` (all default `true`). |
+| `harden.sh` extras | `HARDEN_SHM` (on) / `HARDEN_TMP` `HARDEN_TMP_NOEXEC` (off) mount hardening via `/etc/fstab` lines tagged `# twdxos-hardening`; `ALLOW_PASSWORD_LOCKOUT` for the fail-closed SSH guard. |
+
+Lint note: SC2317 fires on any helper that ends up unused in a given script,
+and on the `trap`ed `_on_exit` (carries a `# shellcheck disable=SC2317`).
+Never use `A && B || C` — ShellCheck SC2015. Keep `${CURL_OPTS:-}` unquoted
+with a targeted `# shellcheck disable=SC2086`.
 
 ## File Map (with anchors)
 
@@ -137,9 +161,15 @@ sudo bash harden.sh --dry-run
 # Recompute every shipped-file checksum (paste into FILE_CHECKSUMS)
 for f in configs/50unattended-upgrades configs/20auto-upgrades configs/needrestart.conf \
          configs/auto-reboot.service configs/auto-reboot.timer.tpl configs/fail2ban-jail.local \
-         modules/wp-auto-update.sh.tpl; do
+         configs/journald-twdxos.conf modules/wp-auto-update.sh.tpl; do
   printf '    ["%s"]="%s"\n' "$f" "$(sha256sum "$f" | awk '{print $1}')"
 done
+
+# Lint like CI (also covers the enterprise scaffolding)
+shellcheck --severity=style --format=gcc install.sh uninstall.sh harden.sh declutter.sh
+
+# Smoke-test the JSON + exit-code contract without root
+bash install.sh --json --non-interactive --dry-run ; echo "exit=$?"   # -> exit 3 (preflight: not root)
 ```
 
 ## What NOT to Read for Typical Tasks

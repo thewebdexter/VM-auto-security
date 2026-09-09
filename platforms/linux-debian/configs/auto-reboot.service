@@ -1,11 +1,15 @@
 [Unit]
-Description=TWDxOSOptimisation — reboot if a kernel update is pending
+Description=TWDxOSOptimisation — reboot if a kernel/library update is pending
+Documentation=https://github.com/TheWebDexterTech/TWDxOSOptimisation
 ConditionPathExists=/var/run/reboot-required
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/shutdown -r +1 "Rebooting: kernel update pending"
+# 5-minute grace with a wall message so an operator on the box can abort
+# (shutdown -c) if the timing is bad.
+ExecStart=/sbin/shutdown -r +5 "TWDxOSOptimisation: rebooting in 5 min to apply a pending kernel/library update. Run 'shutdown -c' to abort."
 
 [Install]
 WantedBy=multi-user.target

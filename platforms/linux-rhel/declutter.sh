@@ -26,6 +26,7 @@ APPLY=0
 AGGRESSIVE=0
 CRON=0
 SILENT=0  # set by --cron; suppresses report text, only logs actual actions
+JSON=0
 LOG_DIR="/var/log/rhel-declutter"
 LOG_FILE="$LOG_DIR/rhel-declutter-$(date +%Y%m%d-%H%M%S).log"
 LOCK_FILE="/var/run/rhel-declutter.lock"
@@ -44,8 +45,12 @@ for arg in "$@"; do
       CRON=1
       SILENT=1
       ;;
+    --json)
+      JSON=1
+      SILENT=1
+      ;;
     -h|--help)
-      echo "Usage: $0 [--apply] [--aggressive] [--cron]"
+      echo "Usage: $0 [--apply] [--aggressive] [--cron] [--json]"
       echo "  --apply       Actually perform safe actions (default: dry-run/report only)"
       echo "  --aggressive  In addition, interactively offer to purge unused-but-installed"
       echo "                packages and disable inactive services (asks before each one)."
@@ -60,6 +65,9 @@ for arg in "$@"; do
 done
 
 mkdir -p "$LOG_DIR"
+# Reports contain a host inventory (listening ports, package/service lists).
+chmod 750 "$LOG_DIR" 2>/dev/null || true
+umask 027
 
 # Prevent overlapping runs (important for cron)
 exec 200>"$LOCK_FILE"
@@ -67,6 +75,8 @@ if ! flock -n 200; then
   echo "Another instance of $0 is already running (lock: $LOCK_FILE). Exiting." >&2
   exit 1
 fi
+{ touch "$LOG_FILE" && chmod 640 "$LOG_FILE"; } 2>/dev/null || true
+if [[ $JSON -eq 1 ]]; then exec 3>&1 1>>"$LOG_FILE" 2>&1; fi
 
 # Trim old logs from this script so they don't become clutter themselves
 find "$LOG_DIR" -type f -name 'rhel-declutter-*.log' -mtime +90 -delete 2>/dev/null || true
@@ -213,14 +223,18 @@ if command -v dnf &>/dev/null; then
   fi
 
   # Reboot check (RHEL family has no /var/run/reboot-required flag file;
-  # `dnf needs-restarting -r` is the equivalent signal).
-  if command -v dnf-utils &>/dev/null || rpm -q dnf-utils &>/dev/null || rpm -q yum-utils &>/dev/null; then
-    if ! dnf needs-restarting -r >/dev/null 2>&1; then
+  # `dnf needs-restarting -r` is the equivalent signal). It ships in
+  # dnf-utils/yum-utils; probe the subcommand itself rather than a
+  # non-existent "dnf-utils" binary.
+  if dnf needs-restarting --help >/dev/null 2>&1; then
+    # exit 1 = reboot required, 0 = not, 2+ = error
+    dnf needs-restarting -r >/dev/null 2>&1; nr_rc=$?
+    if [[ $nr_rc -eq 1 ]]; then
       note_action "REBOOT REQUIRED after package updates (dnf needs-restarting -r)."
       log "*** REBOOT REQUIRED — schedule one soon to apply kernel/library updates ***"
     fi
   else
-    log "dnf-utils/yum-utils not installed — cannot check 'needs-restarting -r'. Consider: dnf install dnf-utils"
+    log "'dnf needs-restarting' unavailable — install dnf-utils to enable the reboot check."
   fi
 else
   log "Skipping dnf-specific update/upgrade/autoremove (dnf not found)."
@@ -275,15 +289,28 @@ else
   log "(dry-run) would remove rotated log files older than 30 days."
 fi
 
-log "\n-- Stale files in /tmp and /var/tmp (older than 10 days) --"
-find /tmp /var/tmp -mindepth 1 -mtime +10 2>/dev/null | tee -a "$LOG_FILE"
+# Safe temp cleanup: regular files / symlinks only, same filesystem, never
+# sockets/FIFOs/dirs, never system runtime paths. systemd-tmpfiles is
+# preferred where present.
+TMP_PRUNE=( -name 'systemd-private-*' -o -name '.X11-unix' -o -name '.XIM-unix'
+            -o -name '.ICE-unix' -o -name '.font-unix' -o -name '.Test-unix'
+            -o -name 'ssh-*' -o -name 'gpg-*' -o -name 'dbus-*'
+            -o -name 'tmux-*' -o -name '.X0-lock' -o -name 'vmware-*' )
+
+log "\n-- Stale regular files in /tmp and /var/tmp (older than 10 days) --"
+find /tmp /var/tmp -xdev -mindepth 1 \( "${TMP_PRUNE[@]}" \) -prune -o \
+     \( -type f -o -type l \) -mtime +10 -print 2>/dev/null | tee -a "$LOG_FILE"
 
 if [[ $APPLY -eq 1 ]]; then
-  DELETED_TMP=$(find /tmp /var/tmp -mindepth 1 -mtime +10 2>/dev/null | wc -l)
-  find /tmp /var/tmp -mindepth 1 -mtime +10 -delete 2>/dev/null
-  [[ "$DELETED_TMP" -gt 0 ]] && note_action "Cleared $DELETED_TMP stale temp files (>10 days old)"
+  if command -v systemd-tmpfiles &>/dev/null; then
+    systemd-tmpfiles --clean >> "$LOG_FILE" 2>&1 || true
+    note_action "Ran systemd-tmpfiles --clean"
+  fi
+  DELETED_TMP=$(find /tmp /var/tmp -xdev -mindepth 1 \( "${TMP_PRUNE[@]}" \) -prune -o \
+                \( -type f -o -type l \) -mtime +10 -print -delete 2>/dev/null | wc -l)
+  [[ "$DELETED_TMP" -gt 0 ]] && note_action "Cleared $DELETED_TMP stale temp files (>10 days, regular files/symlinks only)"
 else
-  log "(dry-run) would clear /tmp and /var/tmp entries older than 10 days."
+  log "(dry-run) would run systemd-tmpfiles --clean and remove the stale regular files listed above."
 fi
 
 # ---------------------------------------------------------------------------
@@ -447,4 +474,14 @@ else
   log "  3. Re-run with --apply --aggressive to interactively review/disable"
   log "     specific services. Package removals remain manual/deliberate."
   log "  4. Reboot if a kernel update was applied (check for REBOOT REQUIRED above)."
+fi
+
+if [[ $JSON -eq 1 ]]; then
+  ACTIONS_TAKEN=$(grep -c '^\[ACTION\]' "$LOG_FILE" 2>/dev/null || echo 0)
+  REBOOT_REQ=false
+  dnf needs-restarting -r >/dev/null 2>&1 || { [[ $? -eq 1 ]] && REBOOT_REQ=true; }
+  printf '{"tool":"twdxos","platform":"linux-rhel","script":"declutter","mode":"%s","aggressive":%s,"actions_taken":%s,"reboot_required":%s,"log_file":"%s","timestamp":"%s"}\n' \
+    "$([[ $APPLY -eq 1 ]] && echo apply || echo dry-run)" \
+    "$([[ $AGGRESSIVE -eq 1 ]] && echo true || echo false)" \
+    "${ACTIONS_TAKEN:-0}" "$REBOOT_REQ" "$LOG_FILE" "$(date -Iseconds)" >&3
 fi

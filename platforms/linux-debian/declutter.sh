@@ -27,6 +27,7 @@ APPLY=0
 AGGRESSIVE=0
 CRON=0
 SILENT=0  # set by --cron; suppresses report text, only logs actual actions
+JSON=0
 LOG_DIR="/var/log/linux-declutter"
 LOG_FILE="$LOG_DIR/linux-declutter-$(date +%Y%m%d-%H%M%S).log"
 LOCK_FILE="/var/run/linux-declutter.lock"
@@ -45,8 +46,12 @@ for arg in "$@"; do
       CRON=1
       SILENT=1
       ;;
+    --json)
+      JSON=1
+      SILENT=1
+      ;;
     -h|--help)
-      echo "Usage: $0 [--apply] [--aggressive] [--cron]"
+      echo "Usage: $0 [--apply] [--aggressive] [--cron] [--json]"
       echo "  --apply       Actually perform safe actions (default: dry-run/report only)"
       echo "  --aggressive  In addition, interactively offer to purge unused-but-installed"
       echo "                packages and disable inactive services (asks before each one)."
@@ -61,6 +66,10 @@ for arg in "$@"; do
 done
 
 mkdir -p "$LOG_DIR"
+# These reports contain a host inventory (listening ports, package/service
+# lists) — keep them out of world-readable reach.
+chmod 750 "$LOG_DIR" 2>/dev/null || true
+umask 027
 
 # Prevent overlapping runs (important for cron)
 exec 200>"$LOCK_FILE"
@@ -68,6 +77,11 @@ if ! flock -n 200; then
   echo "Another instance of $0 is already running (lock: $LOCK_FILE). Exiting." >&2
   exit 1
 fi
+{ touch "$LOG_FILE" && chmod 640 "$LOG_FILE"; } 2>/dev/null || true
+
+# --json: keep stdout clean for the final machine-readable line; everything
+# else goes to the log file.
+if [[ $JSON -eq 1 ]]; then exec 3>&1 1>>"$LOG_FILE" 2>&1; fi
 
 # Trim old logs from this script so they don't become clutter themselves
 find "$LOG_DIR" -type f -name 'linux-declutter-*.log' -mtime +90 -delete 2>/dev/null || true
@@ -267,8 +281,12 @@ if [[ "$PKG_MANAGER" == "apt" ]]; then
   log "\n-- Installed kernel packages (current one is kept regardless) --"
   dpkg --list | grep -E '^ii  linux-(image|headers|modules)' | awk '{print $2}' | tee -a "$LOG_FILE"
 
-  OLD_KERNELS=$(dpkg --list | grep -E '^ii  linux-(image|headers|modules)-[0-9]' \
-                 | awk '{print $2}' | grep -v "${CURRENT_KERNEL//-generic/}" || true)
+  # Keep every package whose name ends in the exact running release string
+  # (e.g. linux-image-6.8.0-31-generic, linux-image-6.8.0-1010-oracle).
+  OLD_KERNELS=$(dpkg --list \
+                 | grep -E '^ii  linux-(image|headers|modules|modules-extra)-[0-9]' \
+                 | awk '{print $2}' \
+                 | grep -vE -- "-${CURRENT_KERNEL}$" || true)
 
   if [[ -n "$OLD_KERNELS" ]]; then
     log "\nOld kernel packages NOT matching the running kernel ($CURRENT_KERNEL):"
@@ -310,15 +328,31 @@ else
   log "(dry-run) would remove rotated log files older than 30 days."
 fi
 
-log "\n-- Stale files in /tmp and /var/tmp (older than 10 days) --"
-find /tmp /var/tmp -mindepth 1 -mtime +10 2>/dev/null | tee -a "$LOG_FILE"
+# Safe temp cleanup: only regular files / symlinks older than 10 days, on the
+# same filesystem, never sockets/FIFOs/dirs, and never system-owned runtime
+# paths (systemd-private-*, .X11-unix, snap-*, .ICE-unix, ssh-* agents, …).
+# systemd-tmpfiles is preferred where present — it honours the OS's own
+# per-path age policy instead of a blanket mtime sweep.
+TMP_PRUNE=( -name 'systemd-private-*' -o -name '.X11-unix' -o -name '.XIM-unix'
+            -o -name '.ICE-unix' -o -name '.font-unix' -o -name '.Test-unix'
+            -o -name 'snap.*' -o -name 'snap-private-*' -o -name 'ssh-*'
+            -o -name 'gpg-*' -o -name 'dbus-*' -o -name '.esd-*'
+            -o -name 'tmux-*' -o -name '.X0-lock' -o -name 'vmware-*' )
+
+log "\n-- Stale regular files in /tmp and /var/tmp (older than 10 days) --"
+find /tmp /var/tmp -xdev -mindepth 1 \( "${TMP_PRUNE[@]}" \) -prune -o \
+     \( -type f -o -type l \) -mtime +10 -print 2>/dev/null | tee -a "$LOG_FILE"
 
 if [[ $APPLY -eq 1 ]]; then
-  DELETED_TMP=$(find /tmp /var/tmp -mindepth 1 -mtime +10 2>/dev/null | wc -l)
-  find /tmp /var/tmp -mindepth 1 -mtime +10 -delete 2>/dev/null
-  [[ "$DELETED_TMP" -gt 0 ]] && note_action "Cleared $DELETED_TMP stale temp files (>10 days old)"
+  if command -v systemd-tmpfiles &>/dev/null; then
+    systemd-tmpfiles --clean >> "$LOG_FILE" 2>&1 || true
+    note_action "Ran systemd-tmpfiles --clean (honours OS per-path age policy)"
+  fi
+  DELETED_TMP=$(find /tmp /var/tmp -xdev -mindepth 1 \( "${TMP_PRUNE[@]}" \) -prune -o \
+                \( -type f -o -type l \) -mtime +10 -print -delete 2>/dev/null | wc -l)
+  [[ "$DELETED_TMP" -gt 0 ]] && note_action "Cleared $DELETED_TMP stale temp files (>10 days, regular files/symlinks only)"
 else
-  log "(dry-run) would clear /tmp and /var/tmp entries older than 10 days."
+  log "(dry-run) would run systemd-tmpfiles --clean and remove the stale regular files listed above."
 fi
 
 # --- snap leftovers (Ubuntu) ---
@@ -506,4 +540,14 @@ else
   log "  3. Re-run with --apply --aggressive to interactively review/disable"
   log "     specific services. Package purges remain manual/deliberate."
   log "  4. Reboot if a kernel update was applied (check for REBOOT REQUIRED above)."
+fi
+
+if [[ $JSON -eq 1 ]]; then
+  ACTIONS_TAKEN=$(grep -c '^\[ACTION\]' "$LOG_FILE" 2>/dev/null || echo 0)
+  REBOOT_REQ=false
+  [[ -f /var/run/reboot-required ]] && REBOOT_REQ=true
+  printf '{"tool":"twdxos","platform":"linux-debian","script":"declutter","mode":"%s","aggressive":%s,"actions_taken":%s,"reboot_required":%s,"log_file":"%s","timestamp":"%s"}\n' \
+    "$([[ $APPLY -eq 1 ]] && echo apply || echo dry-run)" \
+    "$([[ $AGGRESSIVE -eq 1 ]] && echo true || echo false)" \
+    "${ACTIONS_TAKEN:-0}" "$REBOOT_REQ" "$LOG_FILE" "$(date -Iseconds)" >&3
 fi

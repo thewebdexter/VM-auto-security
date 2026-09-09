@@ -30,10 +30,19 @@ This folder is self-contained — it has no dependency on any other platform fol
 ## Quick Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/main/platforms/macos/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/v2.0.0/platforms/macos/install.sh | sudo bash
 ```
 
-Run this as your normal admin user via `sudo` (not from a root shell) — the installer uses `$SUDO_USER` to figure out which user's `launchd` GUI session should own the scheduled declutter job. Every file this installer fetches is verified against a hardcoded SHA256 digest first.
+Run this as your normal admin user via `sudo` (not from a root shell) — the installer uses `$SUDO_USER` to figure out which user's `launchd` GUI session should own the scheduled declutter job. Every fetched file is verified against a SHA256 digest (`shasum -a 256`) and, with `--require-signatures`, a minisign signature.
+
+### Enterprise flags (all scripts)
+
+`--json` · `--offline` (with `BUNDLE_DIR`) · `--non-interactive` · `--require-signatures` · `--strict` · `--ref <tag|sha>`. Exit codes: `0` ok · `2` usage · `3` preflight · `4` partial · `5` integrity.
+
+> **v2.0.0:** `declutter.sh --cron` is now report-only for orphaned launch
+> agents/daemons, and no longer auto-runs `brew upgrade --formula` /
+> `brew autoremove` / `mas upgrade` (still offered interactively). See
+> [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Dry-Run Mode
 

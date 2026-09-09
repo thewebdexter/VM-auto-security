@@ -1,33 +1,34 @@
-# TWDxOSOptimisation — fail2ban jail.local
+# TWDxOSOptimisation — fail2ban jail.local (v2.0.0)
 # https://github.com/TheWebDexterTech/TWDxOSOptimisation
 #
-# Drop-in tuning for fail2ban. Ships with sshd brute-force protection and
-# a recidive jail that long-bans repeat offenders. Re-install or edit and
-# `systemctl reload fail2ban` to apply changes.
+# DEFAULT CHANGED in v2.0.0: ignoreip is now LOOPBACK ONLY.
+# Whitelisting all of RFC1918 (10/8, 172.16/12, 192.168/16) is unsafe on
+# cloud VMs behind a NAT / load-balancer / tunnel that presents a private
+# source IP (it would trust the whole internet), and on shared VPCs (it
+# trusts every lateral host). Add YOUR trusted management CIDRs below.
 
 [DEFAULT]
-# Trust loopback and private RFC1918 by default; add your VPN/office CIDRs here.
-ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+# Add office / VPN / bastion CIDRs here — space-separated. Example:
+#   ignoreip = 127.0.0.1/8 ::1 203.0.113.0/24 198.51.100.7
+ignoreip = 127.0.0.1/8 ::1
 
-# Window in which `maxretry` failures will trigger a ban.
+# Window in which `maxretry` failures trigger a ban.
 findtime = 10m
 
-# How long an IP stays banned (1 hour for the default jails).
+# Base ban duration (grows on repeat offenders — see bantime.increment).
 bantime  = 1h
 
-# Bantime grows exponentially on repeat bans, capped at bantime.maxtime.
 bantime.increment = true
 bantime.factor    = 2
 bantime.maxtime   = 1w
 
-# How many failures within findtime before banning.
 maxretry = 5
 
-# Use systemd journal as the log backend (Ubuntu 24.04 default).
+# systemd journal backend (Ubuntu 22.04+/Debian 12 default).
 backend  = systemd
 
-# Use nftables-multiport on modern Ubuntu; falls back to iptables if absent.
-banaction = nftables-multiport
+# nftables on modern Debian/Ubuntu; falls back to iptables if absent.
+banaction          = nftables-multiport
 banaction_allports = nftables-allports
 
 [sshd]
@@ -36,7 +37,7 @@ mode     = aggressive
 port     = ssh
 maxretry = 4
 
-# Long-ban repeat offenders that get re-banned multiple times.
+# Long-ban IPs that keep coming back after their first ban expires.
 [recidive]
 enabled  = true
 logpath  = /var/log/fail2ban.log

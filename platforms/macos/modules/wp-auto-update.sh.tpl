@@ -17,7 +17,9 @@ set -uo pipefail
 WP_PATH="__WP_PATH__"
 WP_USER="__WP_USER__"
 LOG="__LOG_FILE__"
-LOCK="/tmp/wp-auto-update.lock"
+# Per-user lock in the caller's private temp dir — never a predictable path in
+# shared /tmp (symlink-follow risk on multi-user Macs).
+LOCK="${TMPDIR:-/tmp}/twdxos-wp-auto-update.$(id -u).lock"
 
 # Single-instance guard: silently skip if another run is in progress.
 exec 9>"$LOCK"

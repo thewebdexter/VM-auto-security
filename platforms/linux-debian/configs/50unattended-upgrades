@@ -1,50 +1,50 @@
-// TWDxOSOptimisation — unattended-upgrades policy
+// TWDxOSOptimisation — unattended-upgrades policy (v2.0.0)
 // https://github.com/TheWebDexterTech/TWDxOSOptimisation
+//
+// DEFAULT CHANGED in v2.0.0: security pocket ONLY. Feature/-updates and
+// DevRelease upgrades are no longer applied automatically — they carry
+// regression risk that a hands-off *security* tool should not take on your
+// behalf. Add "${distro_id}:${distro_codename}-updates" below if you want
+// the old behaviour back.
 
 Unattended-Upgrade::Allowed-Origins {
-	"${distro_id}:${distro_codename}";
 	"${distro_id}:${distro_codename}-security";
 	"${distro_id}ESMApps:${distro_codename}-apps-security";
 	"${distro_id}ESM:${distro_codename}-infra-security";
-	"${distro_id}:${distro_codename}-updates";
 };
 
-// Packages that should never be auto-upgraded (add holds here if needed).
+// Never auto-upgrade these (add held/pinned packages here).
 Unattended-Upgrade::Package-Blacklist {
 };
 
-Unattended-Upgrade::DevRelease "auto";
+// Stay on the stable release; never chase a development pocket.
+Unattended-Upgrade::DevRelease "false";
 
 // Recover from a half-applied dpkg state on the next run.
 Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 
-// Keep memory pressure low on small VMs by upgrading one package at a time.
+// One package at a time — keeps memory pressure low on small VMs.
 Unattended-Upgrade::MinimalSteps "true";
 
-// Reclaim disk by purging kernels / deps that auto-updates leave behind.
+// Reclaim disk from superseded kernels / now-unused dependencies.
 Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 
-// Automatic reboot only when a kernel patch needs it; not while users active.
-Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
-Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+// Reboots are owned by auto-reboot.timer (respects REBOOT_TIME, Persistent).
+// Do NOT let unattended-upgrades reboot too, or you get two mechanisms.
+Unattended-Upgrade::Automatic-Reboot "false";
 
-// Mail notifications only on failure; install bsd-mailx or postfix to receive.
-// Edit this address (or remove the line) to enable.
-//Unattended-Upgrade::Mail "root";
+// Failure notifications are configured out-of-band in
+// /etc/apt/apt.conf.d/52unattended-upgrades-twdxos when ADMIN_EMAIL is set.
 Unattended-Upgrade::MailReport "on-change";
 
-// Network resilience: retry transient failures instead of giving up.
+// Network resilience.
 Acquire::Retries "3";
 
-// Verbose journald output so failures are visible to journalctl/log shippers.
+// Verbose journald output so log shippers can see failures.
 Unattended-Upgrade::Verbose "true";
 
-// Hard cap how long a single upgrade run may stall before aborting.
+// Do not pause for AC power on VMs; skip metered links.
 Unattended-Upgrade::OnlyOnACPower "false";
 Unattended-Upgrade::Skip-Updates-On-Metered-Connections "true";
-
-// Refuse to upgrade if /var or /boot are nearly full.
-Unattended-Upgrade::MinimalSteps "true";
