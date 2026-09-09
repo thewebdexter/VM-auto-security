@@ -29,10 +29,16 @@ This folder is self-contained — it has no dependency on any other platform fol
 ## Quick Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/main/platforms/linux-rhel/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/v2.0.0/platforms/linux-rhel/install.sh | sudo bash
 ```
 
-Idempotent — safe to re-run. Every config file this installer fetches is verified against a hardcoded SHA256 digest before being written to disk (see `FILE_CHECKSUMS` in `install.sh`).
+Idempotent — safe to re-run. Every fetched file is verified against a SHA256 digest in `install.sh` (and, with `--require-signatures`, a minisign signature). Mismatch aborts with exit 5.
+
+### Enterprise flags (all scripts)
+
+`--json` · `--offline` (with `BUNDLE_DIR`) · `--non-interactive` · `--require-signatures` · `--strict` · `--ref <tag|sha>` · env toggles `ENABLE_DNF_AUTOMATIC` / `ENABLE_FAIL2BAN` / `ENABLE_NEEDRESTART` / `ENABLE_AUTO_REBOOT` / `ENABLE_TIMESYNC` / `ENABLE_JOURNALD_TUNING`. Exit codes: `0` ok · `2` usage · `3` preflight · `4` partial · `5` integrity.
+
+> **v2.0.0 changed defaults** — `dnf-automatic` is now security-only, `needrestart` is list-only, `fail2ban` `ignoreip` is loopback-only, and the WP module installs **only when `WP_PATH` is set**. See [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Manual Install (clone repository)
 
@@ -79,7 +85,7 @@ sudo SSH_PORT=22 OPEN_HTTP=true OPEN_HTTPS=true bash harden.sh
 ## Headless Configuration (install.sh)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/main/platforms/linux-rhel/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/v2.0.0/platforms/linux-rhel/install.sh | \
   sudo WP_PATH=/var/www/mysite \
   WP_USER=apache \
   ENABLE_CLEANUP=true \

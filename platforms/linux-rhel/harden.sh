@@ -1,170 +1,196 @@
 #!/bin/bash
 # =============================================================================
-# TWDxOSOptimisation — Linux (RHEL/Fedora/CentOS) Server Hardening
+# TWDxOSOptimisation — Linux (RHEL/Fedora/CentOS) Host Hardening
 # https://github.com/TheWebDexterTech/TWDxOSOptimisation
 #
-# Hardens the host OS: SSH daemon (drop-in config), kernel/network sysctls,
-# and firewalld. Run after install.sh — safe to re-run (idempotent).
+# Idempotent OS hardening: SSH drop-in, kernel/network sysctls, firewalld,
+# optional /dev/shm + /tmp mount-option hardening, SELinux status report.
+# Never changes SELinux mode or policy. Standalone — no install.sh dependency.
 #
-# Usage:
-#   sudo bash harden.sh [--dry-run] [--help]
+# Enterprise flags:  --json  --non-interactive  --strict  --dry-run
+# Exit codes:  0 ok · 2 usage · 3 preflight · 4 partial
 #
-# Headless:
-#   sudo SSH_PORT=22 ENABLE_FIREWALLD=true bash harden.sh
-#
-# Tested: Rocky Linux 9, AlmaLinux 9, Fedora 40 — x86_64 + aarch64
+# Tested: Rocky 9, AlmaLinux 9, Fedora 40 — x86_64 + aarch64
 # License: MIT
 # =============================================================================
 
 set -euo pipefail
 
-# ── Colours ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; BOLD='\033[1m'; CYAN='\033[0;36m'; NC='\033[0m'
+TWDX_VERSION="2.0.0"
+TWDX_PLATFORM="linux-rhel"
+TWDX_SCRIPT="harden"
 
-info()    { echo -e "${BLUE}[info]${NC}  $*"; }
-success() { echo -e "${GREEN}[ ok ]${NC}  $*"; }
-warn()    { echo -e "${YELLOW}[warn]${NC}  $*"; }
-error()   { echo -e "${RED}[fail]${NC}  $*" >&2; exit 1; }
-step()    { echo -e "\n${BOLD}▸ $*${NC}"; }
-dry_run() { echo -e "${YELLOW}[dry-run]${NC}  Would: $*"; }
+EX_OK=0; EX_ERR=1; EX_USAGE=2; EX_PREFLIGHT=3; EX_PARTIAL=4
 
-show_help() {
-    cat <<'EOF'
-TWDxOSOptimisation — Linux (RHEL/Fedora/CentOS) Server Hardening
-
-Usage:
-  sudo bash harden.sh [--dry-run|--check] [--help|-h]
-
-Environment variables:
-  SSH_PORT          SSH port to allow through firewalld  [22]
-  ENABLE_FIREWALLD  Enable and configure firewalld        [true]
-  OPEN_HTTP         Allow inbound port 80                 [true]
-  OPEN_HTTPS        Allow inbound port 443                [true]
-  DRY_RUN           Preview without applying              [false]
-
-Examples:
-  sudo bash harden.sh
-  sudo bash harden.sh --dry-run
-  sudo SSH_PORT=2222 OPEN_HTTP=false bash harden.sh
-EOF
-}
-
-# ── Branding ──────────────────────────────────────────────────────────────────
-echo -e "${CYAN}${BOLD}"
-echo "  ================================================================="
-echo "  TWDxOSOptimisation — Linux (RHEL/Fedora/CentOS) Server Hardening   "
-echo "                                                                   "
-echo "               Developed by: TheWebDexter.com                      "
-echo "  ================================================================="
-echo -e "${NC}"
-
-# ── Arg parsing ───────────────────────────────────────────────────────────────
 DRY_RUN="${DRY_RUN:-false}"
-for arg in "$@"; do
-    case "$arg" in
-        --help|-h)         show_help; exit 0 ;;
-        --dry-run|--check) DRY_RUN="true" ;;
-        *)                 warn "Unknown argument: $arg (use --help)" ;;
-    esac
-done
-[[ "$DRY_RUN" == "true" ]] && warn "Dry-run mode: no changes will be made."
+NON_INTERACTIVE="${NON_INTERACTIVE:-false}"
+JSON_OUTPUT="${JSON_OUTPUT:-false}"
+ASSUME_YES="${ASSUME_YES:-false}"
+ALLOW_PASSWORD_LOCKOUT="${ALLOW_PASSWORD_LOCKOUT:-false}"
 
-# ── Default Configuration ─────────────────────────────────────────────────────
 SSH_PORT="${SSH_PORT:-22}"
 ENABLE_FIREWALLD="${ENABLE_FIREWALLD:-true}"
 OPEN_HTTP="${OPEN_HTTP:-true}"
 OPEN_HTTPS="${OPEN_HTTPS:-true}"
+HARDEN_SSH="${HARDEN_SSH:-true}"
+HARDEN_SYSCTL="${HARDEN_SYSCTL:-true}"
+HARDEN_SHM="${HARDEN_SHM:-true}"
+HARDEN_TMP="${HARDEN_TMP:-false}"
+HARDEN_TMP_NOEXEC="${HARDEN_TMP_NOEXEC:-false}"
 
-# ── Input Validation ──────────────────────────────────────────────────────────
-validate_port() {
-    local val="$1" name="$2"
-    if ! [[ "$val" =~ ^[0-9]+$ ]] || (( val < 1 || val > 65535 )); then
-        error "${name} must be a port number between 1 and 65535 (got: '${val}')"
+if [[ -t 1 && "$JSON_OUTPUT" != "true" ]]; then
+    RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
+    BLUE=$'\033[0;34m'; BOLD=$'\033[1m'; CYAN=$'\033[0;36m'; NC=$'\033[0m'
+else
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; CYAN=""; NC=""
+fi
+_out() { if [[ "$JSON_OUTPUT" == "true" ]]; then printf '%b\n' "$*" >&2; else printf '%b\n' "$*"; fi; }
+info()    { _out "${BLUE}[info]${NC}  $*"; }
+success() { _out "${GREEN}[ ok ]${NC}  $*"; }
+warn()    { _out "${YELLOW}[warn]${NC}  $*"; }
+step()    { _out "\n${BOLD}▸ $*${NC}"; }
+dry_run() { _out "${YELLOW}[dry-run]${NC}  Would: $*"; }
+
+declare -a JSON_STEPS=()
+STEP_FAILURES=0
+FINAL_EXIT=0
+_JSON_EMITTED=""
+
+json_escape() { local s=${1-}; s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/}; printf '%s' "$s"; }
+mark_step() {
+    JSON_STEPS+=("$(printf '{"name":"%s","status":"%s","detail":"%s"}' "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "${3:-}")")")
+    if [[ "$2" == "failed" ]]; then STEP_FAILURES=$((STEP_FAILURES + 1)); fi
+    case "$2" in
+        failed)  warn "step '$1' failed${3:+: $3}" ;;
+        skipped) info "step '$1' skipped${3:+: $3}" ;;
+    esac
+}
+emit_json() {
+    [[ "$JSON_OUTPUT" == "true" ]] || return 0
+    [[ -n "$_JSON_EMITTED" ]] && return 0
+    _JSON_EMITTED=1
+    local joined="" first=1 s
+    for s in "${JSON_STEPS[@]:-}"; do
+        [[ -z "$s" ]] && continue
+        if [[ $first -eq 1 ]]; then joined="$s"; first=0; else joined="$joined,$s"; fi
+    done
+    printf '{"tool":"twdxos","platform":"%s","script":"%s","version":"%s","result":"%s","dry_run":%s,"failures":%d,"exit_code":%d,"host":"%s","timestamp":"%s","steps":[%s]}\n' \
+        "$TWDX_PLATFORM" "$TWDX_SCRIPT" "$TWDX_VERSION" "$1" "$DRY_RUN" "$STEP_FAILURES" "$FINAL_EXIT" \
+        "$(json_escape "$(hostname 2>/dev/null || echo "${HOSTNAME:-unknown}")")" "$(date -Iseconds)" "$joined"
+}
+# shellcheck disable=SC2317,SC2329  # reached only via 'trap ... EXIT'
+_on_exit() {
+    local rc=$?
+    if [[ "$JSON_OUTPUT" == "true" && -z "$_JSON_EMITTED" ]]; then
+        FINAL_EXIT=$rc
+        case "$rc" in
+            0)             emit_json "ok" ;;
+            "$EX_PARTIAL") emit_json "partial" ;;
+            *)             emit_json "error" ;;
+        esac
     fi
 }
+trap _on_exit EXIT
 
-validate_bool() {
-    local val="$1" name="$2"
-    if [[ "$val" != "true" && "$val" != "false" ]]; then
-        error "${name} must be 'true' or 'false' (got: '${val}')"
-    fi
+die() { local code="${2:-$EX_ERR}"; _out "${RED}[fail]${NC}  $1"; FINAL_EXIT="$code"; emit_json "error"; exit "$code"; }
+validate_bool() { [[ "$1" == "true" || "$1" == "false" ]] || die "$2 must be true/false (got '$1')" "$EX_USAGE"; }
+validate_port() { { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); } || die "$2 must be 1-65535 (got '$1')" "$EX_USAGE"; }
+
+show_help() {
+    cat <<'EOF'
+TWDxOSOptimisation — Linux (RHEL/Fedora/CentOS) Host Hardening
+
+Usage: sudo bash harden.sh [--dry-run|--json|--non-interactive|--assume-yes|--strict|--help]
+
+Environment:
+  SSH_PORT [22]  ENABLE_FIREWALLD [true]  OPEN_HTTP [true]  OPEN_HTTPS [true]
+  HARDEN_SSH/HARDEN_SYSCTL [true]  HARDEN_SHM [true]  HARDEN_TMP [false]
+  HARDEN_TMP_NOEXEC [false]  ALLOW_PASSWORD_LOCKOUT [false]
+EOF
 }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h)             show_help; exit 0 ;;
+        --dry-run|--check)      DRY_RUN="true" ;;
+        --json)                JSON_OUTPUT="true" ;;
+        --non-interactive)     NON_INTERACTIVE="true" ;;
+        --assume-yes|--yes|-y) ASSUME_YES="true" ;;
+        --strict)              NON_INTERACTIVE="true" ;;
+        *)                     die "Unknown argument: $1 (use --help)" "$EX_USAGE" ;;
+    esac
+    shift
+done
+if [[ "$JSON_OUTPUT" == "true" || ! -t 1 ]]; then RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; CYAN=""; NC=""; fi
+
+[[ "$JSON_OUTPUT" == "true" ]] || {
+    printf '%b\n' "${CYAN}${BOLD}"
+    echo "  ================================================================="
+    echo "  TWDxOSOptimisation — Linux (RHEL/Fedora/CentOS) Host Hardening     "
+    echo "                     v${TWDX_VERSION}  ·  TheWebDexter.com          "
+    echo "  ================================================================="
+    printf '%b\n' "${NC}"
+}
+[[ "$DRY_RUN" == "true" ]] && warn "Dry-run mode: no changes will be made."
 
 step "Validating configuration"
-validate_port "$SSH_PORT"         "SSH_PORT"
-validate_bool "$ENABLE_FIREWALLD" "ENABLE_FIREWALLD"
-validate_bool "$OPEN_HTTP"        "OPEN_HTTP"
-validate_bool "$OPEN_HTTPS"       "OPEN_HTTPS"
-success "All inputs validated"
+for b in DRY_RUN NON_INTERACTIVE JSON_OUTPUT ASSUME_YES ALLOW_PASSWORD_LOCKOUT \
+         ENABLE_FIREWALLD OPEN_HTTP OPEN_HTTPS HARDEN_SSH HARDEN_SYSCTL HARDEN_SHM \
+         HARDEN_TMP HARDEN_TMP_NOEXEC; do
+    validate_bool "${!b}" "$b"
+done
+validate_port "$SSH_PORT" "SSH_PORT"
+success "Configuration valid"
 
-# ── Preflight ─────────────────────────────────────────────────────────────────
-step "Preflight Checks"
-[[ $EUID -ne 0 ]] && error "Please run as root (or use sudo)."
-
+step "Preflight"
+[[ $EUID -ne 0 ]] && die "Run as root (sudo)." "$EX_PREFLIGHT"
 OS_ID="unknown"
-OS_VERSION="0"
 if [[ -f /etc/os-release ]]; then
     # shellcheck disable=SC1091
-    . /etc/os-release
-    OS_ID="${ID:-unknown}"
-    OS_VERSION="${VERSION_ID:-0}"
+    . /etc/os-release; OS_ID="${ID:-unknown}"
 fi
 case "$OS_ID" in
     rhel|centos|rocky|almalinux|fedora) : ;;
-    *) warn "Tested on RHEL/CentOS/Rocky/AlmaLinux/Fedora — proceeding anyway on ${OS_ID} ${OS_VERSION}" ;;
+    *) warn "Untested distro '$OS_ID' — proceeding" ;;
 esac
-
-if command -v getenforce &>/dev/null; then
-    SELINUX_MODE=$(getenforce)
-    info "SELinux mode: ${SELINUX_MODE}"
-    if [[ "$SELINUX_MODE" == "Enforcing" ]]; then
-        warn "SELinux is Enforcing. This script never changes SELinux mode or policy —"
-        warn "if a hardening step is blocked, review 'audit2why < /var/log/audit/audit.log'"
-        warn "and add a targeted policy module rather than disabling enforcement."
-    fi
+if command -v getenforce &>/dev/null && [[ "$(getenforce)" == "Enforcing" ]]; then
+    info "SELinux Enforcing — this script never runs setenforce or edits policy."
 fi
 
-# ── 1. SSH Daemon Hardening (drop-in /etc/ssh/sshd_config.d) ─────────────────
-step "SSH Daemon Hardening"
-
+# ── 1. SSH hardening ─────────────────────────────────────────────────────
+step "SSH daemon hardening"
 SSH_DROPIN="/etc/ssh/sshd_config.d/99-twdxos-hardening.conf"
-
-if [[ "$DRY_RUN" == "true" ]]; then
-    dry_run "write ${SSH_DROPIN} (CIS-aligned)"
-    dry_run "validate config with: sshd -t"
-    dry_run "systemctl reload sshd"
+if [[ "$HARDEN_SSH" != "true" ]]; then
+    mark_step "ssh" "skipped" "HARDEN_SSH=false"
+elif [[ "$DRY_RUN" == "true" ]]; then
+    dry_run "write $SSH_DROPIN, sshd -t, reload sshd"
+    mark_step "ssh" "dry-run"
 else
-    # Safety: warn if no non-root user has an authorized_keys file (lockout risk).
-    KEY_FOUND=false
+    key_found=false
     while IFS= read -r homedir; do
-        if [[ -f "${homedir}/.ssh/authorized_keys" ]]; then
-            KEY_FOUND=true
-            break
-        fi
-    done < <(awk -F: '($3 >= 1000) {print $6}' /etc/passwd)
-
-    if [[ "$KEY_FOUND" != "true" ]]; then
-        warn "No non-root user with an authorized_keys file was found."
-        warn "Disabling password authentication without SSH keys in place will lock you out."
-        if [ -c /dev/tty ]; then
-            echo -e "  Continue anyway? [y/N]: \c"
-            read -r lockout_ans < /dev/tty
-            [[ "$lockout_ans" =~ ^[Yy]$ ]] || { info "Aborted."; exit 0; }
+        [[ -n "$homedir" && -s "${homedir}/.ssh/authorized_keys" ]] && { key_found=true; break; }
+    done < <(awk -F: '($3 >= 1000) || ($1 == "root") {print $6}' /etc/passwd)
+    [[ -s /root/.ssh/authorized_keys ]] && key_found=true
+    compgen -G "/etc/ssh/authorized_keys.d/*" >/dev/null 2>&1 && key_found=true
+    if grep -RqiE '^\s*AuthorizedKeysCommand\s+\S' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null; then
+        key_found=true
+        info "AuthorizedKeysCommand present — key-based auth assumed provisioned externally."
+    fi
+    if [[ "$key_found" != "true" ]]; then
+        warn "No SSH public key found for root or any regular user."
+        if [[ "$ALLOW_PASSWORD_LOCKOUT" == "true" ]]; then
+            warn "ALLOW_PASSWORD_LOCKOUT=true — proceeding."
+        elif [[ "$NON_INTERACTIVE" == "true" || ! -c /dev/tty ]]; then
+            die "Refusing to disable password auth with no key present. Set ALLOW_PASSWORD_LOCKOUT=true to override." "$EX_PREFLIGHT"
         else
-            warn "No TTY — continuing. Verify key-based SSH access is working before proceeding."
+            read -r -p "  Type 'lockout' to proceed anyway: " ans < /dev/tty || ans=""
+            [[ "$ans" == "lockout" ]] || die "Aborted by operator." "$EX_PREFLIGHT"
         fi
     fi
-
-    # Modern sshd_config.d drop-in: first match wins, applied before main config.
-    # This avoids mutating /etc/ssh/sshd_config and survives dnf upgrades.
     mkdir -p /etc/ssh/sshd_config.d
-    cat > "$SSH_DROPIN" <<'EOF'
-# TWDxOSOptimisation — SSH hardening (CIS-aligned)
-# Loaded by sshd via Include /etc/ssh/sshd_config.d/*.conf
-# First match wins; this file is processed before the main sshd_config.
-
-# Authentication
+    tmp=$(mktemp)
+    cat > "$tmp" <<'EOF'
+# TWDxOSOptimisation — SSH hardening (CIS-aligned). First match wins.
 PermitRootLogin no
 PasswordAuthentication no
 PermitEmptyPasswords no
@@ -177,8 +203,10 @@ PermitUserEnvironment no
 MaxAuthTries 3
 MaxSessions 4
 LoginGraceTime 30
+AllowStreamLocalForwarding no
+PermitTunnel no
+GatewayPorts no
 
-# Session hygiene
 ClientAliveInterval 300
 ClientAliveCountMax 2
 TCPKeepAlive no
@@ -188,41 +216,36 @@ AllowTcpForwarding no
 PrintLastLog yes
 LogLevel VERBOSE
 
-# Cryptography (Mozilla "modern" profile — OpenSSH 8.5+)
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group-exchange-sha256
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128-etm@openssh.com
 HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com,rsa-sha2-512,rsa-sha2-256,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com
 EOF
-    chmod 644 "$SSH_DROPIN"
-
-    if ! sshd -t 2>/tmp/sshd-test-err; then
-        warn "sshd config validation failed — removing drop-in"
-        cat /tmp/sshd-test-err >&2
-        rm -f "$SSH_DROPIN" /tmp/sshd-test-err
-        error "SSH hardening aborted. No changes left behind."
+    if [[ "$SSH_PORT" != "22" ]]; then echo "Port $SSH_PORT" >> "$tmp"; fi
+    install -m 644 "$tmp" "$SSH_DROPIN"
+    rm -f "$tmp"
+    if ! sshd -t 2>/tmp/twdx-sshd-err; then
+        cat /tmp/twdx-sshd-err >&2
+        rm -f "$SSH_DROPIN" /tmp/twdx-sshd-err
+        die "sshd config validation failed — drop-in removed." "$EX_ERR"
     fi
-    rm -f /tmp/sshd-test-err
-
-    systemctl reload sshd
-    success "SSH daemon hardened via drop-in (${SSH_DROPIN})"
+    rm -f /tmp/twdx-sshd-err
+    systemctl reload sshd 2>/dev/null || warn "could not reload sshd"
+    mark_step "ssh" "ok" "port $SSH_PORT"
+    success "SSH hardened via $SSH_DROPIN"
 fi
 
-# ── 2. Kernel & Network Hardening ─────────────────────────────────────────────
-step "Kernel & Network Hardening (sysctl)"
-
+# ── 2. sysctl ───────────────────────────────────────────────────────────
+step "Kernel & network hardening (sysctl)"
 SYSCTL_CONF="/etc/sysctl.d/99-twdxos-hardening.conf"
-
-if [[ "$DRY_RUN" == "true" ]]; then
-    dry_run "write ${SYSCTL_CONF}"
-    dry_run "apply with: sysctl --system"
+if [[ "$HARDEN_SYSCTL" != "true" ]]; then
+    mark_step "sysctl" "skipped" "HARDEN_SYSCTL=false"
+elif [[ "$DRY_RUN" == "true" ]]; then
+    dry_run "write $SYSCTL_CONF; sysctl --system"
+    mark_step "sysctl" "dry-run"
 else
     cat > "$SYSCTL_CONF" <<'EOF'
-# TWDxOSOptimisation — kernel & network hardening
-# https://github.com/TheWebDexterTech/TWDxOSOptimisation
-# CIS RHEL 9 Benchmark §3 (Network) and §1.5 (Kernel) aligned.
-
-# ── IPv4 network hardening ──────────────────────────────────────────────────
+# TWDxOSOptimisation — kernel & network hardening (CIS RHEL 9 aligned).
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_rfc1337 = 1
 net.ipv4.icmp_echo_ignore_broadcasts = 1
@@ -239,23 +262,28 @@ net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv4.conf.all.log_martians = 1
 net.ipv4.conf.default.log_martians = 1
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.all.arp_announce = 2
+net.ipv4.ip_forward = 0
 
-# ── IPv6 network hardening (does NOT disable IPv6) ──────────────────────────
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_ra = 0
+net.ipv6.conf.default.accept_ra = 0
+net.ipv6.conf.all.forwarding = 0
 
-# ── Kernel hardening ────────────────────────────────────────────────────────
 kernel.dmesg_restrict = 1
 kernel.kptr_restrict = 2
 kernel.yama.ptrace_scope = 2
 kernel.sysrq = 0
 kernel.kexec_load_disabled = 1
 kernel.unprivileged_bpf_disabled = 1
+kernel.perf_event_paranoid = 3
+kernel.randomize_va_space = 2
 net.core.bpf_jit_harden = 2
 
-# ── Filesystem hardening (block symlink/hardlink/FIFO TOCTOU attacks) ───────
 fs.protected_symlinks = 1
 fs.protected_hardlinks = 1
 fs.protected_fifos = 2
@@ -263,66 +291,93 @@ fs.protected_regular = 2
 fs.suid_dumpable = 0
 EOF
     chmod 644 "$SYSCTL_CONF"
-    sysctl --system > /dev/null
-    success "Kernel & network hardening applied (${SYSCTL_CONF})"
-fi
-
-# ── 3. firewalld ───────────────────────────────────────────────────────────────
-if [[ "$ENABLE_FIREWALLD" == "true" ]]; then
-    step "firewalld Setup"
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        dry_run "dnf install firewalld"
-        dry_run "systemctl enable --now firewalld"
-        dry_run "firewall-cmd --permanent --add-port=${SSH_PORT}/tcp"
-        [[ "$OPEN_HTTP"  == "true" ]] && dry_run "firewall-cmd --permanent --add-service=http"
-        [[ "$OPEN_HTTPS" == "true" ]] && dry_run "firewall-cmd --permanent --add-service=https"
-        dry_run "firewall-cmd --reload"
+    if sysctl --system >/dev/null 2>&1; then
+        mark_step "sysctl" "ok"
+        success "sysctl hardening applied ($SYSCTL_CONF)"
     else
-        dnf install -y -q firewalld
-        systemctl enable --now firewalld
-
-        firewall-cmd --permanent --add-port="${SSH_PORT}/tcp"
-        [[ "$OPEN_HTTP"  == "true" ]] && firewall-cmd --permanent --add-service=http
-        [[ "$OPEN_HTTPS" == "true" ]] && firewall-cmd --permanent --add-service=https
-        firewall-cmd --reload
-
-        success "firewalld enabled (SSH:${SSH_PORT} HTTP:${OPEN_HTTP} HTTPS:${OPEN_HTTPS})"
-        warn "──────────────────────────────────────────────────────────"
-        warn "NEXT STEP (Cloudflare Tunnel users only):"
-        warn "Once your tunnel is confirmed working, close the SSH port:"
-        warn "  sudo firewall-cmd --permanent --remove-port=${SSH_PORT}/tcp && sudo firewall-cmd --reload"
-        warn "Also remove the SSH ingress rule from your cloud provider"
-        warn "VCN / Security Group settings (e.g. Oracle Cloud Dashboard)."
-        warn "──────────────────────────────────────────────────────────"
+        mark_step "sysctl" "failed" "sysctl --system returned non-zero"
+    fi
+    if [[ "$(cat /proc/sys/kernel/kexec_load_disabled 2>/dev/null || echo 0)" == "1" ]] && systemctl is-enabled kdump >/dev/null 2>&1; then
+        warn "kdump is enabled but kexec_load is now disabled — kdump fails on service restart (reboot loads it early). Adjust if you rely on crash dumps."
     fi
 fi
 
-# ── Done ──────────────────────────────────────────────────────────────────────
-echo
-echo -e "${BOLD}────────────────────────────────────────────────────${NC}"
-if [[ "$DRY_RUN" == "true" ]]; then
-    echo -e "${YELLOW}  Dry-run complete — no changes were made.${NC}"
+# ── 3. /dev/shm and /tmp ───────────────────────────────────────────────
+step "Mount-option hardening (/dev/shm, /tmp)"
+harden_mount() {   # harden_mount <mountpoint> <opts>
+    local mp="$1" opts="$2" cur
+    cur=$(findmnt -no OPTIONS --target "$mp" 2>/dev/null || echo "")
+    info "$mp current options: ${cur:-<unknown>}"
+    [[ "$DRY_RUN" == "true" ]] && { dry_run "ensure $mp mounted $opts (fstab + remount)"; return 0; }
+    sed -i '\| # twdxos-hardening$|d' /etc/fstab
+    printf 'tmpfs %s tmpfs %s 0 0 # twdxos-hardening\n' "$mp" "$opts" >> /etc/fstab
+    if mount -o "remount,$opts" "$mp" 2>/dev/null; then
+        success "$mp remounted: $opts"
+        return 0
+    fi
+    warn "$mp live remount failed — fstab updated; effective on next boot."
+    return 0
+}
+if [[ "$HARDEN_SHM" == "true" ]]; then
+    harden_mount /dev/shm "defaults,nodev,nosuid,noexec"
+    mark_step "harden-shm" "ok"
 else
-    echo -e "${GREEN}  Server hardening complete on $(hostname)${NC}"
+    mark_step "harden-shm" "skipped" "HARDEN_SHM=false"
 fi
-echo -e "${BOLD}────────────────────────────────────────────────────${NC}"
-echo
-
-printf "  %-28s %-14s\n" "Component" "Status"
-echo  "  ──────────────────────────────────────────"
-
-if [[ "$DRY_RUN" == "true" ]]; then
-    printf "  %-28s ${YELLOW}%-14s${NC}\n" "SSH hardening"        "dry-run"
-    printf "  %-28s ${YELLOW}%-14s${NC}\n" "Kernel network stack" "dry-run"
-    [[ "$ENABLE_FIREWALLD" == "true" ]] && \
-        printf "  %-28s ${YELLOW}%-14s${NC}\n" "firewalld" "dry-run"
+if [[ "$HARDEN_TMP" == "true" ]]; then
+    tmp_opts="defaults,nodev,nosuid"
+    if [[ "$HARDEN_TMP_NOEXEC" == "true" ]]; then tmp_opts="$tmp_opts,noexec"; fi
+    harden_mount /tmp "$tmp_opts"
+    mark_step "harden-tmp" "ok" "$tmp_opts"
 else
-    printf "  %-28s ${GREEN}%-14s${NC}\n" "SSH hardening"        "✓ active"
-    printf "  %-28s ${GREEN}%-14s${NC}\n" "Kernel network stack" "✓ active"
-    [[ "$ENABLE_FIREWALLD" == "true" ]] && \
-        printf "  %-28s ${GREEN}%-14s${NC}\n" "firewalld" "✓ active"
+    mark_step "harden-tmp" "skipped" "HARDEN_TMP=false (/tmp noexec can break dnf scriptlets/installers)"
 fi
-echo
-echo -e "${CYAN}  Thank you for using automation by TheWebDexter.com${NC}"
-echo
+
+# ── 4. firewalld ──────────────────────────────────────────────────────
+step "firewalld"
+if [[ "$ENABLE_FIREWALLD" != "true" ]]; then
+    mark_step "firewalld" "skipped" "ENABLE_FIREWALLD=false"
+elif [[ "$DRY_RUN" == "true" ]]; then
+    dry_run "dnf install firewalld; enable --now; add-port $SSH_PORT/tcp; add http/https per flags; reload"
+    [[ "$SSH_PORT" != "22" ]] && dry_run "remove-service=ssh from default zone (custom SSH port)"
+    mark_step "firewalld" "dry-run"
+else
+    if command -v firewall-cmd &>/dev/null || dnf install -y -q firewalld; then
+        systemctl enable --now firewalld
+        firewall-cmd --permanent --add-port="${SSH_PORT}/tcp" >/dev/null
+        if [[ "$SSH_PORT" != "22" ]]; then
+            firewall-cmd --permanent --remove-service=ssh >/dev/null 2>&1 || true
+            warn "Custom SSH port $SSH_PORT: removed the stock 'ssh' service (port 22) from the default zone."
+        fi
+        [[ "$OPEN_HTTP"  == "true" ]] && firewall-cmd --permanent --add-service=http  >/dev/null
+        [[ "$OPEN_HTTPS" == "true" ]] && firewall-cmd --permanent --add-service=https >/dev/null
+        firewall-cmd --reload >/dev/null
+        mark_step "firewalld" "ok" "ssh:$SSH_PORT http:$OPEN_HTTP https:$OPEN_HTTPS"
+        success "firewalld configured (default zone denies everything else)"
+        warn "Cloudflare-Tunnel users: once the tunnel works, remove-port ${SSH_PORT}/tcp and drop the cloud SG rule."
+    else
+        mark_step "firewalld" "failed" "could not install firewalld"
+    fi
+fi
+
+# ── 5. SELinux status (report only) ─────────────────────────────────
+step "SELinux status"
+if command -v getenforce &>/dev/null; then
+    mode=$(getenforce)
+    case "$mode" in
+        Enforcing)  success "SELinux: Enforcing"; mark_step "selinux" "ok" "Enforcing" ;;
+        Permissive) warn "SELinux: Permissive — set SELINUX=enforcing in /etc/selinux/config and reboot."; mark_step "selinux" "failed" "Permissive" ;;
+        Disabled)   warn "SELinux: Disabled — re-enable in /etc/selinux/config, relabel (touch /.autorelabel) and reboot."; mark_step "selinux" "failed" "Disabled" ;;
+        *)          mark_step "selinux" "skipped" "unknown mode '$mode'" ;;
+    esac
+else
+    warn "getenforce not found — SELinux tooling absent."
+    mark_step "selinux" "skipped" "not installed"
+fi
+
+if (( STEP_FAILURES > 0 )); then
+    warn "Hardening completed with $STEP_FAILURES issue(s) — review above."
+    FINAL_EXIT="$EX_PARTIAL"; emit_json "partial"; exit "$EX_PARTIAL"
+fi
+[[ "$JSON_OUTPUT" == "true" ]] || _out "\n${GREEN}${BOLD}  Hardening complete on $(hostname 2>/dev/null || echo host)${NC}\n"
+FINAL_EXIT="$EX_OK"; emit_json "ok"; exit "$EX_OK"

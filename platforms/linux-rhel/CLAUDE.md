@@ -112,7 +112,24 @@ sudo bash harden.sh --dry-run
 
 # Recompute every shipped-file checksum (paste into FILE_CHECKSUMS)
 for f in configs/automatic.conf configs/needrestart.conf configs/auto-reboot.service \
-         configs/auto-reboot.timer.tpl configs/fail2ban-jail.local modules/wp-auto-update.sh.tpl; do
+         configs/auto-reboot.timer.tpl configs/fail2ban-jail.local configs/journald-twdxos.conf \
+         modules/wp-auto-update.sh.tpl; do
   printf '    ["%s"]="%s"\n' "$f" "$(sha256sum "$f" | awk '{print $1}')"
 done
 ```
+
+## v2.0.0 deltas (mirrors linux-debian's scaffolding — read that folder's CLAUDE.md)
+
+- Same `--json` / `--offline` / `--non-interactive` / `--require-signatures` /
+  `--strict` / `--ref` flags, same exit-code contract, same `keys/` dir.
+- New `configs/journald-twdxos.conf`; `configs/automatic.conf` →
+  `upgrade_type = security`; `configs/needrestart.conf` → `'l'`;
+  `configs/fail2ban-jail.local` → `ignoreip` loopback-only;
+  `configs/auto-reboot.service` → `shutdown -r +5` + `wall`.
+- `harden.sh`: firewalld now `--remove-service=ssh` when `SSH_PORT != 22`;
+  adds `HARDEN_SHM`/`HARDEN_TMP`; reports SELinux mode (Permissive/Disabled →
+  `failed` step). WP module (`install.sh`) is opt-in via `WP_PATH`.
+- `declutter.sh`: `--json`; `0750/0640` log perms; `dnf needs-restarting`
+  probe fixed; socket-safe `/tmp` cleanup.
+- Feature toggles: `ENABLE_DNF_AUTOMATIC` `ENABLE_FAIL2BAN` `ENABLE_NEEDRESTART`
+  `ENABLE_AUTO_REBOOT` `ENABLE_TIMESYNC` `ENABLE_JOURNALD_TUNING`.

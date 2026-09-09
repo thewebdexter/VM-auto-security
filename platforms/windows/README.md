@@ -27,7 +27,7 @@ This folder is self-contained — it has no dependency on any other platform fol
 ## Quick Install
 
 ```powershell
-irm https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/main/platforms/windows/Install.ps1 | iex
+irm https://raw.githubusercontent.com/TheWebDexterTech/TWDxOSOptimisation/v2.0.0/platforms/windows/Install.ps1 | iex
 ```
 
 Or, from a clone:
@@ -37,6 +37,17 @@ git clone https://github.com/TheWebDexterTech/TWDxOSOptimisation.git
 cd TWDxOSOptimisation\platforms\windows
 .\Install.ps1
 ```
+
+### Enterprise flags (all scripts)
+
+`-Json` (single-line JSON result on stdout) · `-NonInteractive` · `-DryRun` · `Harden.ps1 -AllowInboundLockout`. Exit codes: `0` ok · `2` usage · `3` preflight · `4` partial.
+
+> **v2.0.0:** the firewall baseline now has a **lockout guard** (adds an
+> inbound allow rule for your live RDP/WinRM/SSH port before default-deny);
+> "Windows Update automation" is a real daily task; `Declutter.ps1` removes
+> `Windows.old` via a self-seeded Disk Cleanup profile; `Harden.ps1` adds
+> telemetry / LLMNR / NetBIOS / SMBv1 / Defender / SmartScreen / AutoRun
+> hardening. See [`CHANGELOG.md`](../../CHANGELOG.md).
 
 ## Dry-Run Mode
 

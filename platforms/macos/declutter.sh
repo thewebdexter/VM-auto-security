@@ -49,6 +49,7 @@ APPLY=0
 AGGRESSIVE=0
 CRON=0
 OS_UPDATES=0
+JSON=0
 SILENT=0  # set to 1 by --cron; suppresses report text, only logs actual actions
 
 LOG_DIR="$HOME/Library/Logs/macos-declutter"
@@ -70,8 +71,12 @@ for arg in "$@"; do
       CRON=1
       SILENT=1
       ;;
+    --json)
+      JSON=1
+      SILENT=1
+      ;;
     -h|--help)
-      echo "Usage: $0 [--apply] [--aggressive] [--os-updates] [--cron]"
+      echo "Usage: $0 [--apply] [--aggressive] [--os-updates] [--cron] [--json]"
       echo "  --apply       Perform safe actions (default: dry-run/report only)"
       echo "  --aggressive  Interactively review unused apps, brew leaves, and"
       echo "                third-party launch agents/daemons for removal."
@@ -86,6 +91,8 @@ for arg in "$@"; do
 done
 
 mkdir -p "$LOG_DIR"
+chmod 700 "$LOG_DIR" 2>/dev/null || true
+umask 077
 
 # ---------------------------------------------------------------------------
 # Lock (no flock on macOS by default) — simple PID-file lock
@@ -99,6 +106,9 @@ if [[ -f "$LOCK_FILE" ]]; then
 fi
 echo $$ > "$LOCK_FILE"
 trap 'rm -f "$LOCK_FILE"' EXIT
+
+# --json: keep stdout clean for the final machine-readable line.
+if [[ $JSON -eq 1 ]]; then touch "$LOG_FILE"; exec 3>&1 1>>"$LOG_FILE" 2>&1; fi
 
 # Trim old logs from this script
 find "$LOG_DIR" -type f -name 'macos-declutter-*.log' -mtime +90 -delete 2>/dev/null || true
@@ -318,7 +328,7 @@ if [[ -n "$BREW_BIN" ]]; then
 
   log "\n-- Upgrading formulae (CLI tools / libraries) --"
   if [[ $APPLY -eq 1 ]]; then
-    if CONFIRM_SAFE=1 confirm "Proceed with 'brew upgrade --formula'?"; then
+    if CONFIRM_SAFE=0 confirm "Proceed with 'brew upgrade --formula'?"; then
       brew upgrade --formula 2>&1 | tee -a "$LOG_FILE"
     else
       log "Skipped formula upgrade by user choice."
@@ -346,7 +356,7 @@ if [[ -n "$MAS_BIN" ]]; then
   log "\n-- Mac App Store updates (mas) --"
   run_as_user "$MAS_BIN" outdated 2>&1 | tee -a "$LOG_FILE"
   if [[ $APPLY -eq 1 ]]; then
-    if CONFIRM_SAFE=1 confirm "Proceed with 'mas upgrade'?"; then
+    if CONFIRM_SAFE=0 confirm "Proceed with 'mas upgrade'?"; then
       run_as_user "$MAS_BIN" upgrade 2>&1 | tee -a "$LOG_FILE"
     fi
   else
@@ -370,7 +380,7 @@ if [[ -n "$BREW_BIN" ]]; then
 
   log "\n-- Homebrew autoremove (orphaned dependencies) --"
   if [[ $APPLY -eq 1 ]]; then
-    if CONFIRM_SAFE=1 confirm "Proceed with 'brew autoremove'?"; then
+    if CONFIRM_SAFE=0 confirm "Proceed with 'brew autoremove'?"; then
       brew autoremove 2>&1 | tee -a "$LOG_FILE"
     fi
   else
@@ -508,16 +518,13 @@ for dir in "${THIRDPARTY_DIRS[@]}"; do
         fi
       fi
     elif [[ $CRON -eq 1 && -n "$ORPHAN" ]]; then
-      # In cron mode auto-remove orphans — binary confirmed missing, safe to clean
-      launchctl unload "$plist" 2>/dev/null || true
-      mkdir -p "$LOG_DIR/removed-plists"
-      if [[ "$plist" == /Library/* ]]; then
-        sudo mv "$plist" "$LOG_DIR/removed-plists/" 2>/dev/null \
-          && note_action "Auto-removed orphaned plist: $plist"
-      else
-        mv "$plist" "$LOG_DIR/removed-plists/" 2>/dev/null \
-          && note_action "Auto-removed orphaned plist: $plist"
-      fi
+      # --cron is REPORT-ONLY here (changed in v2.0.0). "Target binary missing"
+      # is a heuristic that false-positives on wrapper scripts, relative
+      # ProgramArguments, and paths on not-yet-mounted volumes — unattended
+      # removal of a third-party LaunchDaemon is too risky. Flag it; a human
+      # removes it with an interactive `--apply` run.
+      log "  [orphan — review] $label: $ORPHAN"
+      log "         (run 'twdxos-declutter.sh --apply' interactively to remove it)"
     fi
   done
 done
@@ -1013,4 +1020,16 @@ else
   log ""
   log "  Quarantined/backed-up items live in: $LOG_DIR/"
   log "  Nothing is permanently deleted without you seeing it first."
+fi
+
+if [[ $JSON -eq 1 ]]; then
+  ACTIONS_TAKEN=$(grep -c '^\[ACTION\]' "$LOG_FILE" 2>/dev/null || echo 0)
+  RESTART_REQ=false
+  { [[ -f /var/db/.SoftwareUpdateRequireRestart ]] || [[ -f /var/run/com.apple.SoftwareUpdate.requireRestart ]]; } && RESTART_REQ=true
+  printf '{"tool":"twdxos","platform":"macos","script":"declutter","mode":"%s","aggressive":%s,"os_updates":%s,"actions_taken":%s,"restart_required":%s,"log_file":"%s","timestamp":"%s"}\n' \
+    "$([[ $APPLY -eq 1 ]] && echo apply || echo dry-run)" \
+    "$([[ $AGGRESSIVE -eq 1 ]] && echo true || echo false)" \
+    "$([[ $OS_UPDATES -eq 1 ]] && echo true || echo false)" \
+    "${ACTIONS_TAKEN:-0}" "$RESTART_REQ" "$LOG_FILE" \
+    "$(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)" >&3
 fi

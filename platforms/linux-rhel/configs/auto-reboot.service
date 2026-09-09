@@ -1,14 +1,16 @@
 [Unit]
 Description=TWDxOSOptimisation — reboot if a pending update requires it (RHEL family)
-After=network.target
+Documentation=https://github.com/TheWebDexterTech/TWDxOSOptimisation
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-# `dnf needs-restarting -r` exits 0 if no reboot is needed, 1 if one is.
-# There is no RHEL-family equivalent of Debian's /var/run/reboot-required
-# flag file, so the check itself is embedded here rather than gated by
-# ConditionPathExists.
-ExecStart=/bin/bash -c '/usr/bin/dnf needs-restarting -r >/dev/null 2>&1; if [ "$?" -eq 1 ]; then /sbin/shutdown -r +1 "Rebooting: update requires restart"; fi'
+# `dnf needs-restarting -r` exits 0 if no reboot is needed, 1 if one is,
+# and 2+ on error. Only reboot on exactly 1. There is no RHEL-family
+# /var/run/reboot-required flag file, so the check is embedded here.
+# 5-minute grace + wall message so an operator can abort with 'shutdown -c'.
+ExecStart=/bin/bash -c '/usr/bin/dnf needs-restarting -r >/dev/null 2>&1; rc=$?; if [ "$rc" -eq 1 ]; then /sbin/shutdown -r +5 "TWDxOSOptimisation: rebooting in 5 min to apply a pending update. Run '"'"'shutdown -c'"'"' to abort."; fi'
 
 [Install]
 WantedBy=multi-user.target

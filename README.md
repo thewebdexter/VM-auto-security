@@ -19,7 +19,25 @@ This project deliberately does **not** try to unify Linux, macOS, and Windows be
 | macOS | [platforms/macos/README.md](platforms/macos/README.md) |
 | Windows | [platforms/windows/README.md](platforms/windows/README.md) |
 
-Each does some combination of: unattended OS security updates, intrusion prevention / firewall hardening, SSH hardening, kernel/network sysctl hardening, scheduled disk/log/cache cleanup, and a conditional reboot when a pending update requires one — using whatever native tooling that platform actually has (apt/unattended-upgrades + fail2ban + UFW on Debian, dnf-automatic + firewalld on RHEL, launchd + Homebrew on macOS, Task Scheduler + Windows Defender Firewall on Windows).
+Each does some combination of: unattended OS **security** updates, intrusion prevention / firewall hardening, SSH hardening, kernel/network sysctl hardening, time-sync assurance, journald/log retention, scheduled disk/log/cache cleanup, and a conditional reboot when a pending update requires one — using whatever native tooling that platform actually has (apt/unattended-upgrades + fail2ban + UFW on Debian, dnf-automatic + firewalld on RHEL, launchd + Homebrew on macOS, Task Scheduler + Windows Defender Firewall + telemetry/LLMNR/SMBv1/Defender hardening on Windows).
+
+### Enterprise CLI contract (v2.0.0)
+
+Every `install` / `harden` / `declutter` / `uninstall` script accepts:
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` / `--check` | Preview only |
+| `--json` | Single-line JSON result on stdout; human logs on stderr |
+| `--offline` | No network fetches — run from files beside the script (`BUNDLE_DIR`); honours `HTTP(S)_PROXY` on the online path |
+| `--non-interactive` | Never prompt; fail closed on unresolved decisions |
+| `--require-signatures` | minisign signature check (in addition to SHA-256) is mandatory |
+| `--strict` | `--non-interactive` + `--require-signatures` |
+| `--ref <tag\|sha>` | Fetch configs from a pinned git ref (Bash platforms) |
+
+Stable exit codes: **0** ok · **2** usage · **3** preflight · **4** partial · **5** integrity.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full v2.0.0 behaviour-change list before upgrading an existing host.
 
 ## Optional WordPress module
 

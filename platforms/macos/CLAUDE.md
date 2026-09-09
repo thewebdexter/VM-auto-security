@@ -74,3 +74,21 @@ for f in declutter.sh configs/com.twdxos.declutter.plist.tpl modules/wp-auto-upd
   printf '    ["%s"]="%s"\n' "$f" "$(shasum -a 256 "$f" | awk '{print $1}')"
 done
 ```
+
+## v2.0.0 deltas
+
+- Same enterprise scaffolding as the Linux folders: `--json` / `--offline` /
+  `--non-interactive` / `--require-signatures` / `--strict` / `--ref`, exit
+  codes `0/2/3/4/5`, `keys/twdxos-release.pub` (placeholder). `install.sh`
+  fetch verification uses `shasum -a 256` + `minisign`.
+- `declutter.sh` (checksum-pinned): `--json`; `LOG_DIR` `0700` + `umask 077`;
+  `--cron` is **report-only** for orphaned launch agents/daemons (was
+  auto-moving them); `brew upgrade --formula` / `brew autoremove` /
+  `mas upgrade` now auto-decline under `--cron` (still offered interactively).
+- `harden.sh`: JSON + exit codes; App Firewall stealth; SSH drop-in only when
+  `sshd_config` Includes `sshd_config.d/*`; **report-only** FileVault /
+  Gatekeeper / SIP / screen-lock (dropped the removed `spctl --master-enable`
+  advice).
+- `modules/wp-auto-update.sh.tpl`: lock/log moved out of shared `/tmp`
+  (`$TMPDIR` + per-uid name); `LOG_FILE` defaults under
+  `~/Library/Logs/macos-declutter/`.
