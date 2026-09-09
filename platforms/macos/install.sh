@@ -84,7 +84,7 @@ emit_json() {
         "$STEP_FAILURES" "$FINAL_EXIT" "$(json_escape "$(hostname 2>/dev/null || echo host)")" \
         "$(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)" "$joined"
 }
-# shellcheck disable=SC2317  # reached via 'trap ... EXIT'
+# shellcheck disable=SC2317,SC2329  # reached only via 'trap ... EXIT'
 _on_exit() {
     local rc=$?
     local f
